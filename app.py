@@ -106,6 +106,9 @@ if uploaded_file is not None:
             output_lines = []
             interval_sec = timestamp_interval * 60
             next_target_sec = 0.0
+            
+            # ハルシネーション対策用プロンプト（書き方のお手本を与えることで無音時の暴走を防ぐ）
+            guide_prompt = "こんにちは。本日の会議・会話を文字起こしします。"
 
             for i in range(num_chunks):
                 c_start = actual_start + (i * chunk_sec)
@@ -122,22 +125,41 @@ if uploaded_file is not None:
 
                 try:
                     with open(chunk_filepath, "rb") as audio_file:
-                        # temperature=0 を指定して無音時の幻覚（ハルシネーション）を強力に抑制
                         response = client.audio.transcriptions.create(
                             model="whisper-1",
                             file=audio_file,
                             language="ja",
-                            temperature=0,
+                            prompt=guide_prompt,
+                            temperature=0.0,
                             response_format="verbose_json",
                             timestamp_granularities=["segment"]
                         )
+
+                    last_text = ""
+                    repeat_count = 0
 
                     for segment in response.segments:
                         text = segment.text.strip()
                         if not text:
                             continue
 
-                        # 有効な発言のタイムスタンプ出力
+                        # 同じ文字列が繰り返し出力された場合の連続生成ガード (2回まで許可)
+                        if text == last_text:
+                            repeat_count += 1
+                            if repeat_count >= 2:
+                                continue
+                        else:
+                            last_text = text
+                            repeat_count = 0
+
+                        # 代表的なハルシネーション単語のブラックリスト除外
+                        if any(bad_word in text for bad_word in [
+                            "お気に召し上がり", "E233系", "ご視聴ありがとうございました", 
+                            "チャンネル登録", "高評価", "字幕:", "Subtitles by"
+                        ]):
+                            continue
+
+                        # タイムスタンプの出力
                         abs_start = c_start + segment.start
                         if abs_start >= next_target_sec:
                             mins = int(abs_start // 60)
