@@ -106,7 +106,6 @@ if uploaded_file is not None:
             output_lines = []
             interval_sec = timestamp_interval * 60
             next_target_sec = 0.0
-            recent_texts = []
 
             for i in range(num_chunks):
                 c_start = actual_start + (i * chunk_sec)
@@ -115,7 +114,6 @@ if uploaded_file is not None:
                 status_box.info(f"文字起こし実行中... ({i + 1} / {num_chunks} ブロック目を処理中)")
 
                 chunk_filepath = f"{tmp_filepath}_chunk_{i}.mp3"
-                # ビットレートを128kにして音質低下による聞き逃しを防止
                 cmd_cut = [
                     "ffmpeg", "-y", "-ss", str(c_start), "-t", str(c_duration),
                     "-i", tmp_filepath, "-ac", "1", "-b:a", "128k", chunk_filepath
@@ -124,10 +122,12 @@ if uploaded_file is not None:
 
                 try:
                     with open(chunk_filepath, "rb") as audio_file:
+                        # temperature=0 を指定して無音時の幻覚（ハルシネーション）を強力に抑制
                         response = client.audio.transcriptions.create(
                             model="whisper-1",
                             file=audio_file,
                             language="ja",
+                            temperature=0,
                             response_format="verbose_json",
                             timestamp_granularities=["segment"]
                         )
@@ -137,20 +137,7 @@ if uploaded_file is not None:
                         if not text:
                             continue
 
-                        # 完全に完全な無音（0.9以上）の場合のみ除外
-                        no_speech_prob = getattr(segment, "no_speech_prob", 0)
-                        if no_speech_prob > 0.9:
-                            continue
-
-                        # 短時間の重複ループのみ除外（直近3件）
-                        if text in recent_texts[-3:]:
-                            continue
-                        recent_texts.append(text)
-
-                        # プロンプト誤誤認識の定型文を除外
-                        if text in ["日本語の会話録音", "韓国語の会話録音", "日本語の会話録音です。"]:
-                            continue
-
+                        # 有効な発言のタイムスタンプ出力
                         abs_start = c_start + segment.start
                         if abs_start >= next_target_sec:
                             mins = int(abs_start // 60)
