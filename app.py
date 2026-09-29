@@ -1,4 +1,5 @@
 import os
+import gc
 import tempfile
 import math
 import subprocess
@@ -61,10 +62,17 @@ if uploaded_file is not None:
                     os.remove(preview_path)
                 if os.path.exists(tmp_filepath):
                     os.remove(tmp_filepath)
+                
+                # メモリ解放
+                gc.collect()
 
     st.markdown("---")
 
     if st.button("指定範囲の文字起こしを開始する", type="primary"):
+        # 古いキャッシュとメモリの破棄
+        st.cache_data.clear()
+        gc.collect()
+
         status_box = st.empty()
         status_box.info("ファイルを準備しています...")
         
@@ -73,7 +81,7 @@ if uploaded_file is not None:
             start_sec = start_min * 60
             end_sec = end_min * 60
 
-            # 8MBチャンク保存
+            # 8MBチャンクで保存
             file_ext = uploaded_file.name.split('.')[-1]
             with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_ext}") as tmp_file:
                 uploaded_file.seek(0)
@@ -81,7 +89,6 @@ if uploaded_file is not None:
                     tmp_file.write(chunk)
                 tmp_filepath = tmp_file.name
 
-            # ffprobe で総再生時間を取得
             def get_duration(filepath):
                 cmd = [
                     "ffprobe", "-v", "error", "-show_entries",
@@ -96,14 +103,13 @@ if uploaded_file is not None:
             actual_end = end_sec if (end_sec > 0 and end_sec > start_sec) else total_sec
             target_duration = actual_end - actual_start
 
-            # 20分（1200秒）単位で分割
             chunk_sec = 20 * 60
             num_chunks = math.ceil(target_duration / chunk_sec)
 
             output_lines = []
             interval_sec = timestamp_interval * 60
             next_target_sec = 0.0
-            recent_texts = []  # 直近のテキスト履歴を保持してループ検知
+            recent_texts = []
 
             system_prompt = "日本語の会話録音です。"
 
@@ -136,17 +142,14 @@ if uploaded_file is not None:
                         if not text:
                             continue
 
-                        # 1. ノイズ・無音区間の判定（no_speech_probが高い場合はスキップ）
                         no_speech_prob = getattr(segment, "no_speech_prob", 0)
                         if no_speech_prob > 0.6:
                             continue
 
-                        # 2. 短い単語の無限ループ判定（直近5つの認識結果と重複確認）
                         if text in recent_texts[-5:]:
                             continue
                         recent_texts.append(text)
 
-                        # 3. システムプロンプトや特定の定型除外文
                         if text in [system_prompt, "無音や雑音の区間は出力しないでください。"]:
                             continue
 
@@ -160,8 +163,10 @@ if uploaded_file is not None:
                         output_lines.append(text)
 
                 finally:
+                    # 分割ファイルの即時削除とガベージコレクション
                     if os.path.exists(chunk_filepath):
                         os.remove(chunk_filepath)
+                    gc.collect()
 
             st.session_state["transcript_result"] = "\n".join(output_lines)
             status_box.success("すべての文字起こし処理が完了しました！")
@@ -171,6 +176,7 @@ if uploaded_file is not None:
         finally:
             if tmp_filepath and os.path.exists(tmp_filepath):
                 os.remove(tmp_filepath)
+            gc.collect()
 
     # 結果表示
     if st.session_state.get("transcript_result"):
