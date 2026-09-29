@@ -27,7 +27,7 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None:
-    # プレビュー表示（ファイルをそのまま渡すことでメモリ超過を防ぎます）
+    # 簡易プレイヤー（メモリ負荷を低減）
     st.audio(uploaded_file)
     
     st.subheader("⚙️ 設定オプション")
@@ -44,15 +44,17 @@ if uploaded_file is not None:
         status_box = st.empty()
         status_box.info("ファイルを準備しています...")
         
+        tmp_filepath = None
         try:
-            # 「分」を「秒」に換算
             start_sec = start_min * 60
             end_sec = end_min * 60
 
-            # アップロードファイルをディスク上の一時ファイルに保存（メモリ節約）
+            # メモリ節約：チャンク単位でディスクに書き出す
             file_ext = uploaded_file.name.split('.')[-1]
             with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_ext}") as tmp_file:
-                tmp_file.write(uploaded_file.getbuffer())
+                uploaded_file.seek(0)
+                while chunk := uploaded_file.read(1024 * 1024 * 8):  # 8MBずつディスク保存
+                    tmp_file.write(chunk)
                 tmp_filepath = tmp_file.name
 
             # ffprobe で再生時間を取得
@@ -79,7 +81,8 @@ if uploaded_file is not None:
             next_target_sec = 0.0
             last_text = ""
 
-            system_prompt = "日本語の音声会話を文字起こしします。無音や雑音の区間は出力しないでください。"
+            # Whisperの文脈理解を助けるフレーズ（指示文ではなく文脈文）
+            system_prompt = "これは日本語での日常会話やインタビューの録音です。"
 
             for i in range(num_chunks):
                 c_start = actual_start + (i * chunk_sec)
@@ -110,6 +113,11 @@ if uploaded_file is not None:
                         if not text:
                             continue
 
+                        # プロンプト自体や無視したい定型句を除外
+                        if text in [system_prompt, "無音や雑音の区間は出力しないでください。"]:
+                            continue
+
+                        # 重複（幻覚ループ）スキップ
                         if text == last_text:
                             continue
                         last_text = text
@@ -127,15 +135,15 @@ if uploaded_file is not None:
                     if os.path.exists(chunk_filepath):
                         os.remove(chunk_filepath)
 
-            # 一時ファイルの削除
-            if os.path.exists(tmp_filepath):
-                os.remove(tmp_filepath)
-
             st.session_state["transcript_result"] = "\n".join(output_lines)
             status_box.success("すべての文字起こし処理が完了しました！")
 
         except Exception as e:
             status_box.error(f"エラーが発生しました: {e}")
+        finally:
+            # 一時ファイルの確実に削除
+            if tmp_filepath and os.path.exists(tmp_filepath):
+                os.remove(tmp_filepath)
 
     # 結果表示
     if st.session_state.get("transcript_result"):
