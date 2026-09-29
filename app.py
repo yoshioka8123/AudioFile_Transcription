@@ -27,6 +27,7 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None:
+    # プレビュー表示（Streamlit 内部のメモリオブジェクトを直接渡すことで再生エラーを防止）
     st.audio(uploaded_file)
     
     st.subheader("⚙️ 設定オプション")
@@ -115,10 +116,6 @@ if uploaded_file is not None:
                         os.remove(chunk_filepath)
 
             result_text = "\n".join(output_lines)
-
-            # 後処理
-            if os.path.exists(tmp_filepath):
-                os.remove(tmp_filepath)
 
             status_box.success("すべての文字起こし処理が完了しました！")
 
