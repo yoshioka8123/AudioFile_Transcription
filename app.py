@@ -27,8 +27,9 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None:
-    # プレビュー表示（Streamlit 内部のメモリオブジェクトを直接渡すことで再生エラーを防止）
-    st.audio(uploaded_file)
+    # 1. データをバイナリとして保持（再生エラー防止策）
+    audio_bytes = uploaded_file.getvalue()
+    st.audio(audio_bytes, format=f"audio/{uploaded_file.name.split('.')[-1]}")
     
     st.subheader("⚙️ 設定オプション")
     
@@ -45,13 +46,13 @@ if uploaded_file is not None:
         status_box.info("ファイルを準備しています...")
         
         try:
-            # 1. アップロードファイルを一時保存
+            # 2. アップロードファイルを一時保存
             file_ext = uploaded_file.name.split('.')[-1]
             with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_ext}") as tmp_file:
-                tmp_file.write(uploaded_file.getvalue())
+                tmp_file.write(audio_bytes)
                 tmp_filepath = tmp_file.name
 
-            # 2. ffprobe で再生時間を取得
+            # 3. ffprobe で再生時間を取得
             def get_duration(filepath):
                 cmd = [
                     "ffprobe", "-v", "error", "-show_entries",
@@ -67,13 +68,17 @@ if uploaded_file is not None:
             actual_end = end_sec if (end_sec > 0 and end_sec > start_sec) else total_sec
             target_duration = actual_end - actual_start
 
-            # 3. 25MB制限を回避するため、20分（1200秒）ごとに分割処理
+            # 4. 20分（1200秒）ごとに分割処理
             chunk_sec = 20 * 60
             num_chunks = math.ceil(target_duration / chunk_sec)
 
             output_lines = []
             interval_sec = timestamp_interval * 60
             next_target_sec = 0.0
+            last_text = ""  # ★重複（ループ）判定用変数
+
+            # ★無音・幻覚ループを抑止するプロンプト
+            system_prompt = "日本語の音声会話を文字起こしします。無音や雑音の区間は出力しないでください。"
 
             for i in range(num_chunks):
                 c_start = actual_start + (i * chunk_sec)
@@ -81,7 +86,7 @@ if uploaded_file is not None:
                 
                 status_box.info(f"文字起こし実行中... ({i + 1} / {num_chunks} ブロック目を処理中)")
 
-                # ffmpeg で 20 分ごとに切り出し (.mp3 に圧縮して送信)
+                # ffmpeg で 20 分ごとに切り出し
                 chunk_filepath = f"{tmp_filepath}_chunk_{i}.mp3"
                 cmd_cut = [
                     "ffmpeg", "-y", "-ss", str(c_start), "-t", str(c_duration),
@@ -95,27 +100,40 @@ if uploaded_file is not None:
                             model="whisper-1",
                             file=audio_file,
                             language="ja",
+                            prompt=system_prompt,
                             response_format="verbose_json",
                             timestamp_granularities=["segment"]
                         )
 
-                    # タイムスタンプ補正と整形
+                    # ★タイムスタンプ補正と重複カット処理
                     for segment in response.segments:
+                        text = segment.text.strip()
+                        if not text:
+                            continue
+
+                        # ★直前と同じ文章が連続した場合はスキップ（ループ対策）
+                        if text == last_text:
+                            continue
+                        last_text = text
+
                         abs_start = c_start + segment.start
-                        
                         if abs_start >= next_target_sec:
                             mins = int(abs_start // 60)
                             secs = int(abs_start % 60)
                             output_lines.append(f"\n--- [{mins:02d}:{secs:02d}] ---")
                             next_target_sec = ((int(abs_start) // interval_sec) + 1) * interval_sec
 
-                        output_lines.append(segment.text.strip())
+                        output_lines.append(text)
 
                 finally:
                     if os.path.exists(chunk_filepath):
                         os.remove(chunk_filepath)
 
             result_text = "\n".join(output_lines)
+
+            # 一時ファイルの削除
+            if os.path.exists(tmp_filepath):
+                os.remove(tmp_filepath)
 
             status_box.success("すべての文字起こし処理が完了しました！")
 
