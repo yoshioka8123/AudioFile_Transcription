@@ -1,35 +1,33 @@
 import os
 import tempfile
-import wave
+import math
 import streamlit as st
 from openai import OpenAI
+from pydub import AudioSegment
 
 # ページ基本設定
 st.set_page_config(page_title="音声文字起こしツール", page_icon="🎙️", layout="centered")
 
 st.title("🎙️ 音声文字起こしツール")
-st.write("音声ファイルをアップロードして、指定した範囲やタイムスタンプ間隔で文字起こしを行います。")
+st.write("大容量（最大500MB）の音声ファイルに対応した文字起こしツールです。")
 
-# Secrets から OpenAI API キーを取得
+# APIキーの取得
 api_key = st.secrets.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
-
 if not api_key:
     st.error("OpenAI APIキーが設定されていません。Streamlit の Advanced settings (Secrets) を確認してください。")
     st.stop()
 
 client = OpenAI(api_key=api_key)
 
-# 音声ファイルアップロード
+# アップロード枠
 uploaded_file = st.file_uploader(
     "音声ファイルを選択してください (mp3, wav, m4a など)",
     type=["mp3", "wav", "m4a", "aac", "flac", "ogg"]
 )
 
 if uploaded_file is not None:
-    # プレビュー表示
     st.audio(uploaded_file)
     
-    # オプション設定領域
     st.subheader("⚙️ 設定オプション")
     
     col1, col2 = st.columns(2)
@@ -40,84 +38,92 @@ if uploaded_file is not None:
         
     timestamp_interval = st.slider("タイムスタンプ挿入間隔 (分)", min_value=1, max_value=20, value=5, step=1)
 
-    # 実行ボタン
     if st.button("指定範囲の文字起こしを開始する", type="primary"):
-        with st.spinner("音声を処理中...（数分かかる場合があります）"):
-            try:
-                # 一時ファイルに保存
-                file_ext = uploaded_file.name.split('.')[-1]
-                with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_ext}") as tmp_file:
-                    tmp_file.write(uploaded_file.getvalue())
-                    tmp_filepath = tmp_file.name
+        status_box = st.empty()
+        status_box.info("ファイルを準備中...")
+        
+        try:
+            # 1. アップロードファイルを一時保存
+            file_ext = uploaded_file.name.split('.')[-1]
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_ext}") as tmp_file:
+                tmp_file.write(uploaded_file.getvalue())
+                tmp_filepath = tmp_file.name
 
-                target_filepath = tmp_filepath
+            # 2. pydub で音声読み込みと範囲の切り出し
+            status_box.info("音声を解析・カット中...")
+            audio = AudioSegment.from_file(tmp_filepath)
 
-                # WAV ファイルかつ範囲指定がある場合のみ Python 標準の wave で切り出し
-                if file_ext.lower() == "wav" and (start_sec > 0 or end_sec > 0):
-                    with wave.open(tmp_filepath, 'rb') as wav_in:
-                        params = wav_in.getparams()
-                        framerate = params.framerate
-                        nframes = params.nframes
+            start_ms = start_sec * 1000
+            end_ms = (end_sec * 1000) if (end_sec > 0 and end_sec > start_sec) else len(audio)
+            target_audio = audio[start_ms:end_ms]
+
+            # 3. 25MB制限を回避するため、10分（600,000ms）単位にチャンク分割
+            chunk_length_ms = 10 * 60 * 1000  # 10分
+            total_duration_ms = len(target_audio)
+            total_chunks = math.ceil(total_duration_ms / chunk_length_ms)
+
+            all_segments = []
+            output_lines = []
+            interval_sec = timestamp_interval * 60
+            next_target_sec = 0.0
+
+            # 4. 分割されたチャンクを順番に OpenAI Whisper API へ送信
+            for i in range(total_chunks):
+                status_box.info(f"文字起こし実行中... ({i + 1} / {total_chunks} ブロック目を処理中)")
+                
+                c_start_ms = i * chunk_length_ms
+                c_end_ms = min((i + 1) * chunk_length_ms, total_duration_ms)
+                chunk_audio = target_audio[c_start_ms:c_end_ms]
+
+                # チャンク一時保存 (.mp3)
+                chunk_path = tmp_filepath + f"_chunk_{i}.mp3"
+                chunk_audio.export(chunk_path, format="mp3", bitrate="64k")
+
+                try:
+                    with open(chunk_path, "rb") as audio_file:
+                        response = client.audio.transcriptions.create(
+                            model="whisper-1",
+                            file=audio_file,
+                            language="ja",
+                            response_format="verbose_json",
+                            timestamp_granularities=["segment"]
+                        )
+
+                    # チャンクごとのタイムスタンプを全体時間に補正
+                    chunk_offset_sec = (c_start_ms / 1000.0) + start_sec
+                    for segment in response.segments:
+                        abs_start = chunk_offset_sec + segment.start
                         
-                        start_frame = int(start_sec * framerate)
-                        end_frame = int(end_sec * framerate) if (end_sec > 0 and end_sec > start_sec) else nframes
-                        
-                        wav_in.setpos(start_frame)
-                        frames = wav_in.readframes(end_frame - start_frame)
-                        
-                        trimmed_filepath = tmp_filepath + "_trimmed.wav"
-                        with wave.open(trimmed_filepath, 'wb') as wav_out:
-                            wav_out.setparams(params)
-                            wav_out.writeframes(frames)
-                        target_filepath = trimmed_filepath
+                        if abs_start >= next_target_sec:
+                            mins = int(abs_start // 60)
+                            secs = int(abs_start % 60)
+                            output_lines.append(f"\n--- [{mins:02d}:{secs:02d}] ---")
+                            next_target_sec = ((int(abs_start) // interval_sec) + 1) * interval_sec
 
-                # OpenAI Whisper API で文字起こし実行
-                with open(target_filepath, "rb") as audio_file:
-                    response = client.audio.transcriptions.create(
-                        model="whisper-1",
-                        file=audio_file,
-                        language="ja",
-                        response_format="verbose_json",
-                        timestamp_granularities=["segment"]
-                    )
+                        output_lines.append(segment.text.strip())
 
-                # テキストの整形・タイムスタンプ挿入処理
-                output_lines = []
-                interval_sec = timestamp_interval * 60
-                next_target_sec = 0.0
+                finally:
+                    if os.path.exists(chunk_path):
+                        os.remove(chunk_path)
 
-                for segment in response.segments:
-                    abs_start = start_sec + segment.start
-                    
-                    if abs_start >= next_target_sec:
-                        mins = int(abs_start // 60)
-                        secs = int(abs_start % 60)
-                        output_lines.append(f"\n--- [{mins:02d}:{secs:02d}] ---")
-                        next_target_sec = ((int(abs_start) // interval_sec) + 1) * interval_sec
+            result_text = "\n".join(output_lines)
 
-                    output_lines.append(segment.text.strip())
+            # 後処理
+            if os.path.exists(tmp_filepath):
+                os.remove(tmp_filepath)
 
-                result_text = "\n".join(output_lines)
+            status_box.success("すべての文字起こし処理が完了しました！")
 
-                # 後処理（一時ファイルの削除）
-                if os.path.exists(tmp_filepath):
-                    os.remove(tmp_filepath)
-                if target_filepath != tmp_filepath and os.path.exists(target_filepath):
-                    os.remove(target_filepath)
+            # 結果表示エリア
+            st.subheader("📝 変換結果")
+            st.text_area("文字起こしテキスト", value=result_text, height=350)
 
-                st.success("文字起こしが完了しました！")
+            st.download_button(
+                label="📄 .txt で保存",
+                data=result_text,
+                file_name="transcript.txt",
+                mime="text/plain"
+            )
 
-                # 結果表示エリア
-                st.subheader("📝 変換結果")
-                st.text_area("文字起こしテキスト", value=result_text, height=350)
-
-                # ダウンロードボタン
-                st.download_button(
-                    label="📄 .txt で保存",
-                    data=result_text,
-                    file_name="transcript.txt",
-                    mime="text/plain"
-                )
-
-            except Exception as e:
-                st.error(f"エラーが発生しました: {e}")
+        except Exception as e:
+            status_box.error(f"エラーが発生しました: {e}")
