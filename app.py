@@ -1,9 +1,8 @@
 import os
 import tempfile
-import math
+import wave
 import streamlit as st
 from openai import OpenAI
-from pydub import AudioSegment
 
 # ページ基本設定
 st.set_page_config(page_title="音声文字起こしツール", page_icon="🎙️", layout="centered")
@@ -40,7 +39,7 @@ if uploaded_file is not None:
 
     if st.button("指定範囲の文字起こしを開始する", type="primary"):
         status_box = st.empty()
-        status_box.info("ファイルを準備中...")
+        status_box.info("ファイルを処理中...")
         
         try:
             # 1. アップロードファイルを一時保存
@@ -49,70 +48,64 @@ if uploaded_file is not None:
                 tmp_file.write(uploaded_file.getvalue())
                 tmp_filepath = tmp_file.name
 
-            # 2. pydub で音声読み込みと範囲の切り出し
-            status_box.info("音声を解析・カット中...")
-            audio = AudioSegment.from_file(tmp_filepath)
+            target_filepath = tmp_filepath
 
-            start_ms = start_sec * 1000
-            end_ms = (end_sec * 1000) if (end_sec > 0 and end_sec > start_sec) else len(audio)
-            target_audio = audio[start_ms:end_ms]
+            # WAVファイルかつ範囲指定がある場合は wave で切り出し
+            if file_ext.lower() == "wav" and (start_sec > 0 or end_sec > 0):
+                with wave.open(tmp_filepath, 'rb') as wav_in:
+                    params = wav_in.getparams()
+                    framerate = params.framerate
+                    nframes = params.nframes
+                    
+                    start_frame = int(start_sec * framerate)
+                    end_frame = int(end_sec * framerate) if (end_sec > 0 and end_sec > start_sec) else nframes
+                    
+                    wav_in.setpos(start_frame)
+                    frames = wav_in.readframes(end_frame - start_frame)
+                    
+                    trimmed_filepath = tmp_filepath + "_trimmed.wav"
+                    with wave.open(trimmed_filepath, 'wb') as wav_out:
+                        wav_out.setparams(params)
+                        wav_out.writeframes(frames)
+                    target_filepath = trimmed_filepath
 
-            # 3. 25MB制限を回避するため、10分（600,000ms）単位にチャンク分割
-            chunk_length_ms = 10 * 60 * 1000  # 10分
-            total_duration_ms = len(target_audio)
-            total_chunks = math.ceil(total_duration_ms / chunk_length_ms)
+            status_box.info("OpenAI Whisper API で文字起こしを実行中...")
 
-            all_segments = []
+            # OpenAI Whisper API で文字起こし実行（OpenAI側で最大25MBまで直接受取）
+            with open(target_filepath, "rb") as audio_file:
+                response = client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=audio_file,
+                    language="ja",
+                    response_format="verbose_json",
+                    timestamp_granularities=["segment"]
+                )
+
+            # テキストの整形・タイムスタンプ挿入処理
             output_lines = []
             interval_sec = timestamp_interval * 60
             next_target_sec = 0.0
 
-            # 4. 分割されたチャンクを順番に OpenAI Whisper API へ送信
-            for i in range(total_chunks):
-                status_box.info(f"文字起こし実行中... ({i + 1} / {total_chunks} ブロック目を処理中)")
+            for segment in response.segments:
+                abs_start = start_sec + segment.start
                 
-                c_start_ms = i * chunk_length_ms
-                c_end_ms = min((i + 1) * chunk_length_ms, total_duration_ms)
-                chunk_audio = target_audio[c_start_ms:c_end_ms]
+                if abs_start >= next_target_sec:
+                    mins = int(abs_start // 60)
+                    secs = int(abs_start % 60)
+                    output_lines.append(f"\n--- [{mins:02d}:{secs:02d}] ---")
+                    next_target_sec = ((int(abs_start) // interval_sec) + 1) * interval_sec
 
-                # チャンク一時保存 (.mp3)
-                chunk_path = tmp_filepath + f"_chunk_{i}.mp3"
-                chunk_audio.export(chunk_path, format="mp3", bitrate="64k")
-
-                try:
-                    with open(chunk_path, "rb") as audio_file:
-                        response = client.audio.transcriptions.create(
-                            model="whisper-1",
-                            file=audio_file,
-                            language="ja",
-                            response_format="verbose_json",
-                            timestamp_granularities=["segment"]
-                        )
-
-                    # チャンクごとのタイムスタンプを全体時間に補正
-                    chunk_offset_sec = (c_start_ms / 1000.0) + start_sec
-                    for segment in response.segments:
-                        abs_start = chunk_offset_sec + segment.start
-                        
-                        if abs_start >= next_target_sec:
-                            mins = int(abs_start // 60)
-                            secs = int(abs_start % 60)
-                            output_lines.append(f"\n--- [{mins:02d}:{secs:02d}] ---")
-                            next_target_sec = ((int(abs_start) // interval_sec) + 1) * interval_sec
-
-                        output_lines.append(segment.text.strip())
-
-                finally:
-                    if os.path.exists(chunk_path):
-                        os.remove(chunk_path)
+                output_lines.append(segment.text.strip())
 
             result_text = "\n".join(output_lines)
 
             # 後処理
             if os.path.exists(tmp_filepath):
                 os.remove(tmp_filepath)
+            if target_filepath != tmp_filepath and os.path.exists(target_filepath):
+                os.remove(target_filepath)
 
-            status_box.success("すべての文字起こし処理が完了しました！")
+            status_box.success("文字起こし処理が完了しました！")
 
             # 結果表示エリア
             st.subheader("📝 変換結果")
