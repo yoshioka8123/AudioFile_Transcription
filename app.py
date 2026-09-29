@@ -1,8 +1,8 @@
 import os
 import tempfile
+import wave
 import streamlit as st
 from openai import OpenAI
-from pydub import AudioSegment
 
 # ページ基本設定
 st.set_page_config(page_title="音声文字起こしツール", page_icon="🎙️", layout="centered")
@@ -45,25 +45,34 @@ if uploaded_file is not None:
         with st.spinner("音声を処理中...（数分かかる場合があります）"):
             try:
                 # 一時ファイルに保存
-                with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as tmp_file:
+                file_ext = uploaded_file.name.split('.')[-1]
+                with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_ext}") as tmp_file:
                     tmp_file.write(uploaded_file.getvalue())
                     tmp_filepath = tmp_file.name
 
-                # 音声の切り出し処理 (pydub を使用)
-                audio = AudioSegment.from_file(tmp_filepath)
-                total_duration_sec = len(audio) / 1000.0
+                target_filepath = tmp_filepath
 
-                start_ms = start_sec * 1000
-                end_ms = (end_sec * 1000) if (end_sec > 0 and end_sec > start_sec) else len(audio)
+                # WAV ファイルかつ範囲指定がある場合のみ Python 標準の wave で切り出し
+                if file_ext.lower() == "wav" and (start_sec > 0 or end_sec > 0):
+                    with wave.open(tmp_filepath, 'rb') as wav_in:
+                        params = wav_in.getparams()
+                        framerate = params.framerate
+                        nframes = params.nframes
+                        
+                        start_frame = int(start_sec * framerate)
+                        end_frame = int(end_sec * framerate) if (end_sec > 0 and end_sec > start_sec) else nframes
+                        
+                        wav_in.setpos(start_frame)
+                        frames = wav_in.readframes(end_frame - start_frame)
+                        
+                        trimmed_filepath = tmp_filepath + "_trimmed.wav"
+                        with wave.open(trimmed_filepath, 'wb') as wav_out:
+                            wav_out.setparams(params)
+                            wav_out.writeframes(frames)
+                        target_filepath = trimmed_filepath
 
-                trimmed_audio = audio[start_ms:end_ms]
-
-                # 切り出した音声を一時保存 (.mp3)
-                trimmed_filepath = tmp_filepath + "_trimmed.mp3"
-                trimmed_audio.export(trimmed_filepath, format="mp3")
-
-                # OpenAI Whisper API で文字起こし実行 (タイムスタンプ付き詳細レスポンス)
-                with open(trimmed_filepath, "rb") as audio_file:
+                # OpenAI Whisper API で文字起こし実行
+                with open(target_filepath, "rb") as audio_file:
                     response = client.audio.transcriptions.create(
                         model="whisper-1",
                         file=audio_file,
@@ -78,10 +87,8 @@ if uploaded_file is not None:
                 next_target_sec = 0.0
 
                 for segment in response.segments:
-                    # 全体時間 offset 加算
                     abs_start = start_sec + segment.start
                     
-                    # 指定間隔ごとにタイムスタンプ行を挿入
                     if abs_start >= next_target_sec:
                         mins = int(abs_start // 60)
                         secs = int(abs_start % 60)
@@ -93,8 +100,10 @@ if uploaded_file is not None:
                 result_text = "\n".join(output_lines)
 
                 # 後処理（一時ファイルの削除）
-                os.remove(tmp_filepath)
-                os.remove(trimmed_filepath)
+                if os.path.exists(tmp_filepath):
+                    os.remove(tmp_filepath)
+                if target_filepath != tmp_filepath and os.path.exists(target_filepath):
+                    os.remove(target_filepath)
 
                 st.success("文字起こしが完了しました！")
 
