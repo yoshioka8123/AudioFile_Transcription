@@ -27,15 +27,8 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None:
-    # メモリ節約：新しいファイルがアップロードされた時だけバイナリを保持
-    file_key = f"{uploaded_file.name}_{uploaded_file.size}"
-    if "current_file_key" not in st.session_state or st.session_state["current_file_key"] != file_key:
-        st.session_state["current_file_key"] = file_key
-        st.session_state["audio_bytes"] = uploaded_file.getvalue()
-        st.session_state["transcript_result"] = None
-
-    # プレイヤー表示
-    st.audio(st.session_state["audio_bytes"], format=f"audio/{uploaded_file.name.split('.')[-1]}")
+    # プレビュー表示（ファイルをそのまま渡すことでメモリ超過を防ぎます）
+    st.audio(uploaded_file)
     
     st.subheader("⚙️ 設定オプション")
     
@@ -56,10 +49,10 @@ if uploaded_file is not None:
             start_sec = start_min * 60
             end_sec = end_min * 60
 
-            # 一時ファイルに保存
+            # アップロードファイルをディスク上の一時ファイルに保存（メモリ節約）
             file_ext = uploaded_file.name.split('.')[-1]
             with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_ext}") as tmp_file:
-                tmp_file.write(st.session_state["audio_bytes"])
+                tmp_file.write(uploaded_file.getbuffer())
                 tmp_filepath = tmp_file.name
 
             # ffprobe で再生時間を取得
