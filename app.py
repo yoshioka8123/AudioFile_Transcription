@@ -27,7 +27,7 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None:
-    st.subheader("🎧 範囲指定・プレビュー設定")
+    st.subheader("🎧 範囲指定・設定")
     
     col1, col2 = st.columns(2)
     with col1:
@@ -37,7 +37,7 @@ if uploaded_file is not None:
         
     timestamp_interval = st.slider("タイムスタンプ挿入間隔 (分)", min_value=1, max_value=20, value=5, step=1)
 
-    # --- メモリクラッシュ防止用の試聴機能 ---
+    # 試聴機能
     with st.expander("🔊 開始位置から30秒間だけプレビュー再生する（動作確認用）"):
         if st.button("プレビュー音声を生成"):
             with st.spinner("指定位置の音声を切り出しています..."):
@@ -73,7 +73,7 @@ if uploaded_file is not None:
             start_sec = start_min * 60
             end_sec = end_min * 60
 
-            # 8MBずつのチャンクでディスク（一時ファイル）に保存しメモリを完全保護
+            # 8MBチャンク保存
             file_ext = uploaded_file.name.split('.')[-1]
             with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_ext}") as tmp_file:
                 uploaded_file.seek(0)
@@ -81,7 +81,7 @@ if uploaded_file is not None:
                     tmp_file.write(chunk)
                 tmp_filepath = tmp_file.name
 
-            # ffprobe で再生時間を取得
+            # ffprobe で総再生時間を取得
             def get_duration(filepath):
                 cmd = [
                     "ffprobe", "-v", "error", "-show_entries",
@@ -96,16 +96,16 @@ if uploaded_file is not None:
             actual_end = end_sec if (end_sec > 0 and end_sec > start_sec) else total_sec
             target_duration = actual_end - actual_start
 
-            # 20分（1200秒）ごとに分割処理
+            # 20分（1200秒）単位で分割
             chunk_sec = 20 * 60
             num_chunks = math.ceil(target_duration / chunk_sec)
 
             output_lines = []
             interval_sec = timestamp_interval * 60
             next_target_sec = 0.0
-            last_text = ""
+            recent_texts = []  # 直近のテキスト履歴を保持してループ検知
 
-            system_prompt = "これは日本語での日常会話やインタビューの録音です。"
+            system_prompt = "日本語の会話録音です。"
 
             for i in range(num_chunks):
                 c_start = actual_start + (i * chunk_sec)
@@ -136,13 +136,19 @@ if uploaded_file is not None:
                         if not text:
                             continue
 
-                        # 指示文テキスト等の除外フィルタ
-                        if text in [system_prompt, "無音や雑音の区間は出力しないでください。"]:
+                        # 1. ノイズ・無音区間の判定（no_speech_probが高い場合はスキップ）
+                        no_speech_prob = getattr(segment, "no_speech_prob", 0)
+                        if no_speech_prob > 0.6:
                             continue
 
-                        if text == last_text:
+                        # 2. 短い単語の無限ループ判定（直近5つの認識結果と重複確認）
+                        if text in recent_texts[-5:]:
                             continue
-                        last_text = text
+                        recent_texts.append(text)
+
+                        # 3. システムプロンプトや特定の定型除外文
+                        if text in [system_prompt, "無音や雑音の区間は出力しないでください。"]:
+                            continue
 
                         abs_start = c_start + segment.start
                         if abs_start >= next_target_sec:
