@@ -27,10 +27,7 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None:
-    # プレビュー表示（メモリを圧迫しないよう配慮）
-    st.audio(uploaded_file)
-    
-    st.subheader("⚙️ 設定オプション")
+    st.subheader("🎧 範囲指定・プレビュー設定")
     
     col1, col2 = st.columns(2)
     with col1:
@@ -39,6 +36,33 @@ if uploaded_file is not None:
         end_min = st.number_input("終了位置 (分 / 0で最後まで)", min_value=0, value=0, step=1, help="文字起こしを終了する位置を「分」で指定します（0の場合は最後まで）")
         
     timestamp_interval = st.slider("タイムスタンプ挿入間隔 (分)", min_value=1, max_value=20, value=5, step=1)
+
+    # --- メモリクラッシュ防止用の試聴機能 ---
+    with st.expander("🔊 開始位置から30秒間だけプレビュー再生する（動作確認用）"):
+        if st.button("プレビュー音声を生成"):
+            with st.spinner("指定位置の音声を切り出しています..."):
+                file_ext = uploaded_file.name.split('.')[-1]
+                with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_ext}") as tmp_file:
+                    uploaded_file.seek(0)
+                    while chunk := uploaded_file.read(1024 * 1024 * 8):
+                        tmp_file.write(chunk)
+                    tmp_filepath = tmp_file.name
+
+                preview_path = f"{tmp_filepath}_preview.mp3"
+                p_start = start_min * 60
+                cmd_preview = [
+                    "ffmpeg", "-y", "-ss", str(p_start), "-t", "30",
+                    "-i", tmp_filepath, "-ac", "1", "-b:a", "64k", preview_path
+                ]
+                subprocess.run(cmd_preview, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                
+                if os.path.exists(preview_path):
+                    st.audio(preview_path)
+                    os.remove(preview_path)
+                if os.path.exists(tmp_filepath):
+                    os.remove(tmp_filepath)
+
+    st.markdown("---")
 
     if st.button("指定範囲の文字起こしを開始する", type="primary"):
         status_box = st.empty()
@@ -49,7 +73,7 @@ if uploaded_file is not None:
             start_sec = start_min * 60
             end_sec = end_min * 60
 
-            # メモリ節約：8MBずつのチャンクでディスク（一時ファイル）に直接保存
+            # 8MBずつのチャンクでディスク（一時ファイル）に保存しメモリを完全保護
             file_ext = uploaded_file.name.split('.')[-1]
             with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_ext}") as tmp_file:
                 uploaded_file.seek(0)
@@ -81,7 +105,6 @@ if uploaded_file is not None:
             next_target_sec = 0.0
             last_text = ""
 
-            # Whisperの文脈理解用フレーズ（指示文ではなく文脈表記）
             system_prompt = "これは日本語での日常会話やインタビューの録音です。"
 
             for i in range(num_chunks):
@@ -113,11 +136,10 @@ if uploaded_file is not None:
                         if not text:
                             continue
 
-                        # プロンプト自体や無音時の定型文を除外
+                        # 指示文テキスト等の除外フィルタ
                         if text in [system_prompt, "無音や雑音の区間は出力しないでください。"]:
                             continue
 
-                        # 重複判定
                         if text == last_text:
                             continue
                         last_text = text
