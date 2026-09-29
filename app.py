@@ -8,25 +8,28 @@ from openai import OpenAI
 st.set_page_config(page_title="音声文字起こしツール", page_icon="🎙️", layout="centered")
 
 st.title("🎙️ 音声文字起こしツール")
-st.write("大容量（最大500MB）の音声ファイルに対応した文字起こしツールです。")
+st.write("音声ファイルをアップロードして、指定した範囲やタイムスタンプ間隔で文字起こしを行います。")
 
-# APIキーの取得
+# Secrets から OpenAI API キーを取得
 api_key = st.secrets.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY")
+
 if not api_key:
     st.error("OpenAI APIキーが設定されていません。Streamlit の Advanced settings (Secrets) を確認してください。")
     st.stop()
 
 client = OpenAI(api_key=api_key)
 
-# アップロード枠
+# 音声ファイルアップロード
 uploaded_file = st.file_uploader(
     "音声ファイルを選択してください (mp3, wav, m4a など)",
     type=["mp3", "wav", "m4a", "aac", "flac", "ogg"]
 )
 
 if uploaded_file is not None:
+    # プレビュー表示
     st.audio(uploaded_file)
     
+    # オプション設定領域
     st.subheader("⚙️ 設定オプション")
     
     col1, col2 = st.columns(2)
@@ -37,12 +40,13 @@ if uploaded_file is not None:
         
     timestamp_interval = st.slider("タイムスタンプ挿入間隔 (分)", min_value=1, max_value=20, value=5, step=1)
 
+    # 実行ボタン
     if st.button("指定範囲の文字起こしを開始する", type="primary"):
         status_box = st.empty()
         status_box.info("ファイルを処理中...")
         
         try:
-            # 1. アップロードファイルを一時保存
+            # 一時ファイルに保存
             file_ext = uploaded_file.name.split('.')[-1]
             with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_ext}") as tmp_file:
                 tmp_file.write(uploaded_file.getvalue())
@@ -50,7 +54,7 @@ if uploaded_file is not None:
 
             target_filepath = tmp_filepath
 
-            # WAVファイルかつ範囲指定がある場合は wave で切り出し
+            # WAVファイルかつ範囲指定がある場合は wave モジュールで切り出し
             if file_ext.lower() == "wav" and (start_sec > 0 or end_sec > 0):
                 with wave.open(tmp_filepath, 'rb') as wav_in:
                     params = wav_in.getparams()
@@ -71,7 +75,7 @@ if uploaded_file is not None:
 
             status_box.info("OpenAI Whisper API で文字起こしを実行中...")
 
-            # OpenAI Whisper API で文字起こし実行（OpenAI側で最大25MBまで直接受取）
+            # OpenAI Whisper API で文字起こし実行
             with open(target_filepath, "rb") as audio_file:
                 response = client.audio.transcriptions.create(
                     model="whisper-1",
@@ -99,7 +103,7 @@ if uploaded_file is not None:
 
             result_text = "\n".join(output_lines)
 
-            # 後処理
+            # 後処理（一時ファイルの削除）
             if os.path.exists(tmp_filepath):
                 os.remove(tmp_filepath)
             if target_filepath != tmp_filepath and os.path.exists(target_filepath):
