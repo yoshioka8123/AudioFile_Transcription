@@ -32,18 +32,18 @@ if uploaded_file is not None:
     if "current_file_key" not in st.session_state or st.session_state["current_file_key"] != file_key:
         st.session_state["current_file_key"] = file_key
         st.session_state["audio_bytes"] = uploaded_file.getvalue()
-        st.session_state["transcript_result"] = None  # 新しいファイル時は過去結果をクリア
+        st.session_state["transcript_result"] = None
 
-    # プレイヤー表示（データは session_state から参照）
+    # プレイヤー表示
     st.audio(st.session_state["audio_bytes"], format=f"audio/{uploaded_file.name.split('.')[-1]}")
     
     st.subheader("⚙️ 設定オプション")
     
     col1, col2 = st.columns(2)
     with col1:
-        start_sec = st.number_input("開始位置 (秒)", min_value=0, value=0, step=1)
+        start_min = st.number_input("開始位置 (分)", min_value=0, value=0, step=1, help="文字起こしを開始する位置を「分」で指定します")
     with col2:
-        end_sec = st.number_input("終了位置 (秒 / 0で最後まで)", min_value=0, value=0, step=1)
+        end_min = st.number_input("終了位置 (分 / 0で最後まで)", min_value=0, value=0, step=1, help="文字起こしを終了する位置を「分」で指定します（0の場合は最後まで）")
         
     timestamp_interval = st.slider("タイムスタンプ挿入間隔 (分)", min_value=1, max_value=20, value=5, step=1)
 
@@ -52,6 +52,10 @@ if uploaded_file is not None:
         status_box.info("ファイルを準備しています...")
         
         try:
+            # 「分」を「秒」に換算
+            start_sec = start_min * 60
+            end_sec = end_min * 60
+
             # 一時ファイルに保存
             file_ext = uploaded_file.name.split('.')[-1]
             with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_ext}") as tmp_file:
@@ -80,7 +84,7 @@ if uploaded_file is not None:
             output_lines = []
             interval_sec = timestamp_interval * 60
             next_target_sec = 0.0
-            last_text = ""  # 重複（ループ）判定用
+            last_text = ""
 
             system_prompt = "日本語の音声会話を文字起こしします。無音や雑音の区間は出力しないでください。"
 
@@ -113,7 +117,6 @@ if uploaded_file is not None:
                         if not text:
                             continue
 
-                        # 重複スキップ
                         if text == last_text:
                             continue
                         last_text = text
@@ -135,14 +138,13 @@ if uploaded_file is not None:
             if os.path.exists(tmp_filepath):
                 os.remove(tmp_filepath)
 
-            # 結果を session_state に保存
             st.session_state["transcript_result"] = "\n".join(output_lines)
             status_box.success("すべての文字起こし処理が完了しました！")
 
         except Exception as e:
             status_box.error(f"エラーが発生しました: {e}")
 
-    # 結果が存在する場合は表示
+    # 結果表示
     if st.session_state.get("transcript_result"):
         st.subheader("📝 変換結果")
         st.text_area("文字起こしテキスト", value=st.session_state["transcript_result"], height=350)
