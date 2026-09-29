@@ -53,7 +53,7 @@ if uploaded_file is not None:
                 p_start = start_min * 60
                 cmd_preview = [
                     "ffmpeg", "-y", "-ss", str(p_start), "-t", "30",
-                    "-i", tmp_filepath, "-ac", "1", "-b:a", "64k", preview_path
+                    "-i", tmp_filepath, "-ac", "1", "-b:a", "128k", preview_path
                 ]
                 subprocess.run(cmd_preview, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 
@@ -63,13 +63,11 @@ if uploaded_file is not None:
                 if os.path.exists(tmp_filepath):
                     os.remove(tmp_filepath)
                 
-                # メモリ解放
                 gc.collect()
 
     st.markdown("---")
 
     if st.button("指定範囲の文字起こしを開始する", type="primary"):
-        # 古いキャッシュとメモリの破棄
         st.cache_data.clear()
         gc.collect()
 
@@ -81,7 +79,6 @@ if uploaded_file is not None:
             start_sec = start_min * 60
             end_sec = end_min * 60
 
-            # 8MBチャンクで保存
             file_ext = uploaded_file.name.split('.')[-1]
             with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_ext}") as tmp_file:
                 uploaded_file.seek(0)
@@ -111,8 +108,6 @@ if uploaded_file is not None:
             next_target_sec = 0.0
             recent_texts = []
 
-            system_prompt = "日本語の会話録音です。"
-
             for i in range(num_chunks):
                 c_start = actual_start + (i * chunk_sec)
                 c_duration = min(chunk_sec, actual_end - c_start)
@@ -120,9 +115,10 @@ if uploaded_file is not None:
                 status_box.info(f"文字起こし実行中... ({i + 1} / {num_chunks} ブロック目を処理中)")
 
                 chunk_filepath = f"{tmp_filepath}_chunk_{i}.mp3"
+                # ビットレートを128kにして音質低下による聞き逃しを防止
                 cmd_cut = [
                     "ffmpeg", "-y", "-ss", str(c_start), "-t", str(c_duration),
-                    "-i", tmp_filepath, "-ac", "1", "-b:a", "64k", chunk_filepath
+                    "-i", tmp_filepath, "-ac", "1", "-b:a", "128k", chunk_filepath
                 ]
                 subprocess.run(cmd_cut, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -132,7 +128,6 @@ if uploaded_file is not None:
                             model="whisper-1",
                             file=audio_file,
                             language="ja",
-                            prompt=system_prompt,
                             response_format="verbose_json",
                             timestamp_granularities=["segment"]
                         )
@@ -142,15 +137,18 @@ if uploaded_file is not None:
                         if not text:
                             continue
 
+                        # 完全に完全な無音（0.9以上）の場合のみ除外
                         no_speech_prob = getattr(segment, "no_speech_prob", 0)
-                        if no_speech_prob > 0.6:
+                        if no_speech_prob > 0.9:
                             continue
 
-                        if text in recent_texts[-5:]:
+                        # 短時間の重複ループのみ除外（直近3件）
+                        if text in recent_texts[-3:]:
                             continue
                         recent_texts.append(text)
 
-                        if text in [system_prompt, "無音や雑音の区間は出力しないでください。"]:
+                        # プロンプト誤誤認識の定型文を除外
+                        if text in ["日本語の会話録音", "韓国語の会話録音", "日本語の会話録音です。"]:
                             continue
 
                         abs_start = c_start + segment.start
@@ -163,7 +161,6 @@ if uploaded_file is not None:
                         output_lines.append(text)
 
                 finally:
-                    # 分割ファイルの即時削除とガベージコレクション
                     if os.path.exists(chunk_filepath):
                         os.remove(chunk_filepath)
                     gc.collect()
