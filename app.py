@@ -27,7 +27,7 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None:
-    # 簡易プレイヤー（メモリ負荷を低減）
+    # プレビュー表示（メモリを圧迫しないよう配慮）
     st.audio(uploaded_file)
     
     st.subheader("⚙️ 設定オプション")
@@ -49,11 +49,11 @@ if uploaded_file is not None:
             start_sec = start_min * 60
             end_sec = end_min * 60
 
-            # メモリ節約：チャンク単位でディスクに書き出す
+            # メモリ節約：8MBずつのチャンクでディスク（一時ファイル）に直接保存
             file_ext = uploaded_file.name.split('.')[-1]
             with tempfile.NamedTemporaryFile(delete=False, suffix=f".{file_ext}") as tmp_file:
                 uploaded_file.seek(0)
-                while chunk := uploaded_file.read(1024 * 1024 * 8):  # 8MBずつディスク保存
+                while chunk := uploaded_file.read(1024 * 1024 * 8):
                     tmp_file.write(chunk)
                 tmp_filepath = tmp_file.name
 
@@ -81,7 +81,7 @@ if uploaded_file is not None:
             next_target_sec = 0.0
             last_text = ""
 
-            # Whisperの文脈理解を助けるフレーズ（指示文ではなく文脈文）
+            # Whisperの文脈理解用フレーズ（指示文ではなく文脈表記）
             system_prompt = "これは日本語での日常会話やインタビューの録音です。"
 
             for i in range(num_chunks):
@@ -113,11 +113,11 @@ if uploaded_file is not None:
                         if not text:
                             continue
 
-                        # プロンプト自体や無視したい定型句を除外
+                        # プロンプト自体や無音時の定型文を除外
                         if text in [system_prompt, "無音や雑音の区間は出力しないでください。"]:
                             continue
 
-                        # 重複（幻覚ループ）スキップ
+                        # 重複判定
                         if text == last_text:
                             continue
                         last_text = text
@@ -141,7 +141,6 @@ if uploaded_file is not None:
         except Exception as e:
             status_box.error(f"エラーが発生しました: {e}")
         finally:
-            # 一時ファイルの確実に削除
             if tmp_filepath and os.path.exists(tmp_filepath):
                 os.remove(tmp_filepath)
 
